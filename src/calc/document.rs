@@ -171,17 +171,51 @@ fn blank_line(src: String) -> CompiledLine {
     CompiledLine { source_line: src, latex: None, error: None, comment: None, plot_data: None, table_data: None }
 }
 
+fn eval_cell(cell: &str, env: &HashMap<String, Quantity>) -> String {
+    let s = cell.trim();
+    // Extract optional trailing unit in quotes: `expr "unit"`
+    let (expr_str, unit): (&str, String) = if s.ends_with('"') {
+        if let Some(start) = s[..s.len()-1].rfind('"') {
+            (s[..start].trim(), s[start+1..s.len()-1].to_string())
+        } else { (s, String::new()) }
+    } else { (s, String::new()) };
+
+    if expr_str.is_empty() { return cell.to_string(); }
+
+    let expr = match parse_expr(expr_str) {
+        Ok(e) => e,
+        Err(_) => return cell.to_string(),
+    };
+    let mut result = match eval_q(&expr, env) {
+        Ok(r) => r,
+        Err(_) => return cell.to_string(),
+    };
+    if !unit.is_empty() {
+        if let Some((dim, scale)) = parse_unit(&unit) {
+            result = if result.dim.is_dimensionless() {
+                Quantity { val: result.val, dim, scale }
+            } else {
+                let si = result.si_val();
+                Quantity { val: si / scale, dim, scale }
+            };
+        }
+    }
+    let val = if unit.is_empty() { result.si_val() } else { result.val };
+    let num = crate::export::latex::fmt_num(val);
+    if unit.is_empty() { num } else { format!("{num} {unit}") }
+}
+
 fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>, source: &str) {
     let mut pending_table: Vec<Vec<String>> = Vec::new();
 
-    let flush_table = |pending: &mut Vec<Vec<String>>, out: &mut Vec<CompiledLine>| {
+    let flush_table = |pending: &mut Vec<Vec<String>>, out: &mut Vec<CompiledLine>, env: &HashMap<String, Quantity>| {
         if pending.is_empty() { return; }
         let rows = std::mem::take(pending);
-        let (header, body) = if rows.len() > 1 {
-            (rows[0].clone(), rows[1..].to_vec())
-        } else {
-            (rows[0].clone(), vec![])
-        };
+        // Header row: keep as-is (column labels). Body rows: evaluate each cell.
+        let header = rows[0].clone();
+        let body: Vec<Vec<String>> = rows[1..].iter().map(|row| {
+            row.iter().map(|cell| eval_cell(cell, env)).collect()
+        }).collect();
         out.push(CompiledLine {
             source_line: String::new(),
             latex: None, error: None, comment: None, plot_data: None,
@@ -200,7 +234,7 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
                 continue;
             }
             other => {
-                flush_table(&mut pending_table, &mut *out);
+                flush_table(&mut pending_table, &mut *out, env);
                 match other {
                     Ok(Line::Blank) => {
                         out.push(blank_line(src));
@@ -291,7 +325,7 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
             }
         }
     }
-    flush_table(&mut pending_table, out);
+    flush_table(&mut pending_table, out, env);
 }
 
 fn result_display_val(result: &Quantity, unit: &str) -> f64 {

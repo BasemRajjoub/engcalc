@@ -115,43 +115,100 @@ enum PreviewRow {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_DOC: &str = "\
-# Section properties
-b = 200 \"mm\"
-h = 400 \"mm\"
-A = b * h \"mm^2\"
-I = b * h^3 / 12 \"mm^4\"
-c = h / 2 \"mm\"
-W = I / c \"mm^3\"
+# T-section continuous beam — EN 1992 / S355 design check
 
-# Material & loading
-f_y = 250 \"MPa\"
-E = 200000 \"MPa\"
-L = 6000 \"mm\"
-w = 5 \"N/mm\"
-F = 45 \"kN\"
+# Material properties
+f_yk = 355 \"MPa\"
+f_ck = 30 \"MPa\"
+E_s = 200000 \"MPa\"
+E_c = 33000 \"MPa\"
+gamma_s = 1.15
+gamma_c = 1.5
+f_yd = f_yk / gamma_s \"MPa\"
+f_cd = f_ck / gamma_c \"MPa\"
 
-# Beam bending
-M_max = w * L^2 / 8 \"N·mm\"
-M_Ed = F * L / 4 \"kN·m\"
-sigma = M_max / W \"MPa\"
-delta = 5 * w * L^4 / (384 * E * I) \"mm\"
+# Geometry — T-section
+b_f = 1200 \"mm\"
+h_f = 120 \"mm\"
+b_w = 300 \"mm\"
+h = 600 \"mm\"
+h_w = h - h_f \"mm\"
+cover = 35 \"mm\"
+phi = 20 \"mm\"
+d = h - cover - phi / 2 \"mm\"
 
-# Calculus
-x = 3
-dfdx = diff(x^3 + 2*x, x)
-A_circle = integrate(sqrt(1 - x^2), x, -1, 1)
-S_squares = sum(k^2, k, 1, 10)
+# T-section area and centroid (from bottom)
+A_f = b_f * h_f \"mm^2\"
+A_w = b_w * h_w \"mm^2\"
+A_tot = A_f + A_w \"mm^2\"
+y_f = h - h_f / 2 \"mm\"
+y_w = h_w / 2 \"mm\"
+y_c = (A_f * y_f + A_w * y_w) / A_tot \"mm\"
 
-# Plots
-plot(sin(x), x, -6.28, 6.28) \"sin(x)\"
-plot(cos(x), x, -6.28, 6.28) \"cos(x)\"
+# Second moment of area about centroid
+I_f = b_f * h_f^3 / 12 + A_f * (y_f - y_c)^2 \"mm^4\"
+I_w = b_w * h_w^3 / 12 + A_w * (y_w - y_c)^2 \"mm^4\"
+I_tot = I_f + I_w \"mm^4\"
 
-# Results table
-| Parameter | Value |
-|-----------|-------|
-| b | 200 mm |
-| h | 400 mm |
-| A | 80000 mm^2 |
+# Section moduli
+W_top = I_tot / (h - y_c) \"mm^3\"
+W_bot = I_tot / y_c \"mm^3\"
+
+# Two-span continuous beam — span loading
+L = 8000 \"mm\"
+w_g = 15 \"N/mm\"
+w_q = 20 \"N/mm\"
+w_Ed = 1.35 * w_g + 1.5 * w_q \"N/mm\"
+
+# Elastic moments (two equal spans, UDL — three-moment theorem)
+M_B = w_Ed * L^2 / 8 \"kN·m\"
+M_mid = 9 * w_Ed * L^2 / 128 \"kN·m\"
+M_support = w_Ed * L^2 / 8 \"kN·m\"
+
+# Reactions
+R_A = 3 * w_Ed * L / 8 \"kN\"
+R_B = 10 * w_Ed * L / 8 \"kN\"
+R_C = 3 * w_Ed * L / 8 \"kN\"
+
+# Bending moment diagram along first span (x from A)
+plot(R_A * x - w_Ed * x^2 / 2, x, 0, 8000) \"M(x) span 1 [N·mm]\"
+
+# Shear force diagram along first span
+plot(R_A - w_Ed * x, x, 0, 8000) \"V(x) span 1 [N]\"
+
+# Stress check at midspan (sagging — tension at bottom)
+sigma_bot = M_mid / W_bot \"MPa\"
+sigma_top = M_mid / W_top \"MPa\"
+util_bending = sigma_bot / f_yd
+
+# Deflection check — quasi-permanent (unfactored)
+w_qp = w_g + 0.3 * w_q \"N/mm\"
+delta_mid = w_qp * L^4 / (185 * E_s * I_tot) \"mm\"
+delta_lim = L / 250 \"mm\"
+util_deflection = delta_mid / delta_lim
+
+# Required tension steel area (simplified rectangular stress block)
+z = 0.9 * d \"mm\"
+A_s_req = M_mid / (f_yd * z) \"mm^2\"
+n_bars = 6
+A_s_prov = n_bars * 3.14159 * phi^2 / 4 \"mm^2\"
+util_steel = A_s_req / A_s_prov
+
+# Shear check at support
+V_Ed = R_B / 2 \"kN\"
+V_Ed_N = V_Ed * 1000 \"N\"
+v_Ed = V_Ed_N / (b_w * d) \"MPa\"
+rho_l = A_s_prov / (b_w * d)
+v_Rd_c = 0.18 / gamma_c * (100 * rho_l)^0.3333 * f_ck^0.3333 \"MPa\"
+shear_ok = v_Rd_c - v_Ed \"MPa\"
+
+# Results summary
+| Check | Value | Limit | Utilisation |
+|-------|-------|-------|-------------|
+| Bending stress | sigma_bot \"MPa\" | f_yd \"MPa\" | util_bending |
+| Deflection | delta_mid \"mm\" | delta_lim \"mm\" | util_deflection |
+| Reinforcement | A_s_prov \"mm^2\" | A_s_req \"mm^2\" | util_steel |
+| Shear | v_Ed \"MPa\" | v_Rd_c \"MPa\" | v_Ed / v_Rd_c |
 ";
 
 // ─────────────────────────────────────────────────────────────────────────────

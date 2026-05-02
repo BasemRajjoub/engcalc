@@ -131,8 +131,44 @@ fn ident(name: &str) -> String {
 }
 
 fn ident_base(s: &str) -> String {
-    if s.len() == 1 { s.to_string() }
-    else { format!("\\mathrm{{{s}}}") }
+    // Greek letter names → LaTeX commands
+    match s {
+        "alpha"   => "\\alpha".into(),
+        "beta"    => "\\beta".into(),
+        "gamma"   => "\\gamma".into(),
+        "Gamma"   => "\\Gamma".into(),
+        "delta"   => "\\delta".into(),
+        "Delta"   => "\\Delta".into(),
+        "epsilon" => "\\epsilon".into(),
+        "zeta"    => "\\zeta".into(),
+        "eta"     => "\\eta".into(),
+        "theta"   => "\\theta".into(),
+        "Theta"   => "\\Theta".into(),
+        "iota"    => "\\iota".into(),
+        "kappa"   => "\\kappa".into(),
+        "lambda"  => "\\lambda".into(),
+        "Lambda"  => "\\Lambda".into(),
+        "mu"      => "\\mu".into(),
+        "nu"      => "\\nu".into(),
+        "xi"      => "\\xi".into(),
+        "Xi"      => "\\Xi".into(),
+        "pi"      => "\\pi".into(),
+        "Pi"      => "\\Pi".into(),
+        "rho"     => "\\rho".into(),
+        "sigma"   => "\\sigma".into(),
+        "Sigma"   => "\\Sigma".into(),
+        "tau"     => "\\tau".into(),
+        "upsilon" => "\\upsilon".into(),
+        "phi"     => "\\phi".into(),
+        "Phi"     => "\\Phi".into(),
+        "chi"     => "\\chi".into(),
+        "psi"     => "\\psi".into(),
+        "Psi"     => "\\Psi".into(),
+        "omega"   => "\\omega".into(),
+        "Omega"   => "\\Omega".into(),
+        s if s.len() == 1 => s.to_string(),
+        s => format!("\\mathrm{{{s}}}"),
+    }
 }
 
 fn latex_unit(unit: &str) -> String {
