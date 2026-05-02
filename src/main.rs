@@ -1,8 +1,8 @@
 mod calc;
+mod plot_svg;
 
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-use egui_plot::{Line, Plot, PlotPoints};
 use resvg::{tiny_skia, usvg};
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
@@ -70,8 +70,20 @@ fn compile_typst(world: &mut MinimalWorld, src: &str) -> Result<String, String> 
     Ok(typst_svg::svg_merged(&doc, typst::layout::Abs::pt(0.0)))
 }
 
+fn svg_fontdb() -> std::sync::Arc<fontdb::Database> {
+    use std::sync::OnceLock;
+    static DB: OnceLock<std::sync::Arc<fontdb::Database>> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    }).clone()
+}
+
 fn rasterize(svg: &str, ctx: &egui::Context, id: &str, scale: f32) -> Option<(egui::TextureHandle, [f32; 2])> {
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
+    let mut opts = usvg::Options::default();
+    opts.fontdb = svg_fontdb();
+    let tree = usvg::Tree::from_str(svg, &opts).ok()?;
     let sz = tree.size();
     let w = (sz.width()  * scale) as u32;
     let h = (sz.height() * scale) as u32;
@@ -94,7 +106,6 @@ struct RenderedRow {
     texture:    Option<(egui::TextureHandle, [f32; 2])>,
     error:      Option<String>,
     comment:    Option<String>,
-    plot_data:  Option<calc::document::PlotData>,
     table_data: Option<calc::document::TableData>,
 }
 
@@ -225,31 +236,45 @@ impl App {
 
             let world = &mut self.world;
             let tc    = &mut self.tex_counter;
-            self.cells[i].rows = compiled.into_iter().map(|cl| {
+
+            // Group consecutive plot lines into one SVG, emit other lines individually
+            let mut rows: Vec<RenderedRow> = Vec::new();
+            let mut plot_group: Vec<calc::document::PlotData> = Vec::new();
+
+            let flush_plots = |group: &mut Vec<calc::document::PlotData>, rows: &mut Vec<RenderedRow>, tc: &mut usize, ctx: &egui::Context| {
+                if group.is_empty() { return; }
+                let refs: Vec<&calc::document::PlotData> = group.iter().collect();
+                let svg = plot_svg::render_plot_svg(&refs);
+                *tc += 1;
+                let tex = rasterize(&svg, ctx, &format!("plot_{tc}"), 2.0);
+                rows.push(RenderedRow { texture: tex, error: None, comment: None, table_data: None });
+                group.clear();
+            };
+
+            for cl in compiled {
                 if let Some(pd) = cl.plot_data {
-                    return RenderedRow { texture: None, error: None, comment: None,
-                        plot_data: Some(pd), table_data: None };
+                    plot_group.push(pd);
+                    continue;
                 }
+                flush_plots(&mut plot_group, &mut rows, tc, ctx);
+
                 if let Some(td) = cl.table_data {
-                    return RenderedRow { texture: None, error: None, comment: None,
-                        plot_data: None, table_data: Some(td) };
-                }
-                if let Some(ref typst_src) = cl.typst_src {
+                    rows.push(RenderedRow { texture: None, error: None, comment: None, table_data: Some(td) });
+                } else if let Some(ref typst_src) = cl.typst_src {
                     *tc += 1;
                     match compile_typst(world, typst_src) {
                         Ok(svg) => {
                             let tex = rasterize(&svg, ctx, &format!("tex_{tc}"), 2.0);
-                            RenderedRow { texture: tex, error: None, comment: None,
-                                plot_data: None, table_data: None }
+                            rows.push(RenderedRow { texture: tex, error: None, comment: None, table_data: None });
                         }
-                        Err(e) => RenderedRow { texture: None, error: Some(e), comment: None,
-                            plot_data: None, table_data: None },
+                        Err(e) => rows.push(RenderedRow { texture: None, error: Some(e), comment: None, table_data: None }),
                     }
                 } else {
-                    RenderedRow { texture: None, error: cl.error, comment: cl.comment,
-                        plot_data: None, table_data: None }
+                    rows.push(RenderedRow { texture: None, error: cl.error, comment: cl.comment, table_data: None });
                 }
-            }).collect();
+            }
+            flush_plots(&mut plot_group, &mut rows, tc, ctx);
+            self.cells[i].rows = rows;
         }
     }
 }
@@ -358,16 +383,7 @@ fn render_rows(
     let max_w = 600.0_f32;
 
     for (i, row) in rows.iter().enumerate() {
-        // Plot
-        if let Some(ref pd) = row.plot_data {
-            let plot_points: PlotPoints = pd.points.iter().map(|&[x, y]| [x, y]).collect();
-            let line = Line::new(format!("{}_{}", cell_idx, i), plot_points);
-            Plot::new(format!("plot_{}_{}", cell_idx, i))
-                .height(180.0)
-                .width(panel_w.min(500.0))
-                .show(ui, |plot_ui| { plot_ui.line(line); });
-            continue;
-        }
+        let _ = (i, cell_idx);
 
         // Table
         if let Some(ref td) = row.table_data {
