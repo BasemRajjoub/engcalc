@@ -16,8 +16,8 @@ pub enum Line {
     Eval { expr: Expr, unit: String },
     /// | col1 | col2 | ...  — markdown-style table row
     TableRow(Vec<String>),
-    /// plot(expr, var, a, b)
-    Plot { expr: Expr, var: String, a: f64, b: f64 },
+    /// plot(expr, var, a, b) or plot(expr, var, a, b, "label")
+    Plot { expr: Expr, var: String, a_expr: Expr, b_expr: Expr, label: String },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,18 +72,26 @@ pub fn parse_line(src: &str) -> Result<Line, ParseError> {
         let (rhs, unit) = extract_unit(no_comment);
         let rhs = rhs.trim();
 
-        // Check for plot(expr, var, a, b) bare call
-        if let Ok(Expr::Call(name, args)) = parse_expr(rhs) {
+        // Check for plot(expr, var, a, b) or plot(expr, var, a, b, "label")
+        // Strip optional trailing quoted label before parsing as expr
+        let (plot_rhs, plot_label) = extract_unit(rhs); // reuse unit extractor for quoted label
+        let plot_rhs = plot_rhs.trim();
+        if let Ok(Expr::Call(name, args)) = parse_expr(plot_rhs) {
             if name == "plot" && args.len() == 4 {
                 let var = match &args[1] {
                     Expr::Var(v) => v.clone(),
                     _ => return Err(err("plot: second arg must be variable name")),
                 };
-                // a and b must be numeric literals or simple exprs — eval with empty env
-                let empty: HashMap<String, Quantity> = HashMap::new();
-                let a = eval_q(&args[2], &empty).map_err(|e| err(e))?.val;
-                let b = eval_q(&args[3], &empty).map_err(|e| err(e))?.val;
-                return Ok(Line::Plot { expr: args[0].clone(), var, a, b });
+                let label = if plot_label.is_empty() {
+                    plot_rhs.to_string()
+                } else {
+                    plot_label.clone()
+                };
+                return Ok(Line::Plot {
+                    expr: args[0].clone(), var,
+                    a_expr: args[2].clone(), b_expr: args[3].clone(),
+                    label,
+                });
             }
         }
 
@@ -150,9 +158,26 @@ fn extract_unit(rhs: &str) -> (&str, String) {
 // Compile full document
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Compile source with an initial env (for cell chaining).
+/// Returns compiled lines + the final env (variables defined in this cell).
+pub fn compile_document_with_env(
+    source: &str,
+    initial_env: HashMap<String, Quantity>,
+) -> (Vec<CompiledLine>, HashMap<String, Quantity>) {
+    let mut env = initial_env;
+    let mut out = Vec::new();
+    compile_into(&mut env, &mut out, source);
+    (out, env)
+}
+
 pub fn compile_document(source: &str) -> Vec<CompiledLine> {
     let mut env: HashMap<String, Quantity> = HashMap::new();
     let mut out = Vec::new();
+    compile_into(&mut env, &mut out, source);
+    out
+}
+
+fn compile_into(env: &mut HashMap<String, Quantity>, mut out: &mut Vec<CompiledLine>, source: &str) {
     // Accumulate table rows until a non-table line breaks the sequence
     let mut pending_table: Vec<Vec<String>> = Vec::new();
 
@@ -191,19 +216,26 @@ pub fn compile_document(source: &str) -> Vec<CompiledLine> {
                     Ok(Line::Comment(text)) => {
                         out.push(CompiledLine { source_line: src, typst_src: None, error: None, comment: Some(text), plot_data: None, table_data: None });
                     }
-                    Ok(Line::Plot { expr, var, a, b }) => {
-                        let points = sample_plot(&expr, &var, a, b, &env, 200);
-                        match points {
-                            Ok(pts) => {
-                                let label = src.clone();
-                                out.push(CompiledLine {
-                                    source_line: src, typst_src: None, error: None, comment: None,
-                                    plot_data: Some(PlotData { label, points: pts, x_range: [a, b] }),
-                                    table_data: None,
-                                });
+                    Ok(Line::Plot { expr, var, a_expr, b_expr, label }) => {
+                        let a_res = eval_q(&a_expr, env).map(|q| q.si_val());
+                        let b_res = eval_q(&b_expr, env).map(|q| q.si_val());
+                        match (a_res, b_res) {
+                            (Ok(a), Ok(b)) => {
+                                match sample_plot(&expr, &var, a, b, env, 200) {
+                                    Ok(pts) => {
+                                        out.push(CompiledLine {
+                                            source_line: src, typst_src: None, error: None, comment: None,
+                                            plot_data: Some(PlotData { label, points: pts, x_range: [a, b] }),
+                                            table_data: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        out.push(CompiledLine { source_line: src, typst_src: None, error: Some(e), comment: None, plot_data: None, table_data: None });
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                out.push(CompiledLine { source_line: src, typst_src: None, error: Some(e), comment: None, plot_data: None, table_data: None });
+                            _ => {
+                                out.push(CompiledLine { source_line: src, typst_src: None, error: Some("plot: could not evaluate range".into()), comment: None, plot_data: None, table_data: None });
                             }
                         }
                     }
@@ -267,8 +299,7 @@ pub fn compile_document(source: &str) -> Vec<CompiledLine> {
             }
         }
     }
-    flush_table(&mut pending_table, &mut out);
-    out
+    flush_table(&mut pending_table, out);
 }
 
 fn wrap_typst(math: &str) -> String {

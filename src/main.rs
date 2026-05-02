@@ -160,11 +160,12 @@ S_squares = sum(k^2, k, 1, 10)",
 theta = 0.7854
 hyp = sqrt(sin(theta)^2 + cos(theta)^2)",
 
-    // Cell 5 — plot
+    // Cell 5 — plot (uses x defined in cell 3, theta from cell 4)
     "\
-# Plot: sin and cos
-plot(sin(x), x, -6.28, 6.28)
-plot(cos(x), x, -6.28, 6.28)",
+# Plots
+plot(sin(x), x, -6.28, 6.28) \"sin(x)\"
+plot(cos(x), x, -6.28, 6.28) \"cos(x)\"
+plot(x^2, x, -3, 3) \"x squared\"",
 
     // Cell 6 — table
     "\
@@ -182,49 +183,74 @@ plot(cos(x), x, -6.28, 6.28)",
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct App {
-    world:        MinimalWorld,
-    cells:        Vec<Cell>,
-    md_cache:     CommonMarkCache,
-    drag_src:     Option<usize>,  // index being dragged
-    tex_counter:  usize,          // unique texture IDs
+    world:       MinimalWorld,
+    cells:       Vec<Cell>,
+    /// env exported by each cell (index i = env after cell i completes)
+    cell_envs:   Vec<std::collections::HashMap<String, calc::Quantity>>,
+    md_cache:    CommonMarkCache,
+    tex_counter: usize,
 }
 
 impl App {
     fn new() -> Self {
         let world = MinimalWorld::new();
+        let n = DEFAULT_CELLS.len();
         let cells = DEFAULT_CELLS.iter().map(|s| Cell::new(*s)).collect();
-        Self { world, cells, md_cache: CommonMarkCache::default(), drag_src: None, tex_counter: 0 }
+        Self {
+            world, cells,
+            cell_envs: vec![Default::default(); n],
+            md_cache: CommonMarkCache::default(),
+            tex_counter: 0,
+        }
     }
 
-    fn recompile_cell(&mut self, ci: usize, ctx: &egui::Context) {
-        self.cells[ci].dirty = false;
-        let compiled = calc::compile_document(&self.cells[ci].source);
-        let tc = &mut self.tex_counter;
-        let world = &mut self.world;
-        self.cells[ci].rows = compiled.into_iter().map(|cl| {
-            // Plot data — pass through
-            if let Some(pd) = cl.plot_data {
-                return RenderedRow { texture: None, error: None, comment: None,
-                    plot_data: Some(pd), table_data: None };
-            }
-            // Table data — pass through
-            if let Some(td) = cl.table_data {
-                return RenderedRow { texture: None, error: None, comment: None,
-                    plot_data: None, table_data: Some(td) };
-            }
-            if let Some(ref typst_src) = cl.typst_src {
-                *tc += 1;
-                match compile_typst(world, typst_src) {
-                    Ok(svg) => {
-                        let tex = rasterize(&svg, ctx, &format!("tex_{tc}"), 2.0);
-                        RenderedRow { texture: tex, error: None, comment: None, plot_data: None, table_data: None }
-                    }
-                    Err(e) => RenderedRow { texture: None, error: Some(e), comment: None, plot_data: None, table_data: None },
-                }
+    /// Recompile cell `ci` and all cells after it (env may have changed).
+    fn recompile_from(&mut self, ci: usize, ctx: &egui::Context) {
+        // Ensure cell_envs is same length as cells
+        self.cell_envs.resize_with(self.cells.len(), Default::default);
+
+        for i in ci..self.cells.len() {
+            self.cells[i].dirty = false;
+
+            // Build input env: env exported by previous cell, or empty for cell 0
+            let input_env = if i == 0 {
+                Default::default()
             } else {
-                RenderedRow { texture: None, error: cl.error, comment: cl.comment, plot_data: None, table_data: None }
-            }
-        }).collect();
+                self.cell_envs[i - 1].clone()
+            };
+
+            let (compiled, out_env) =
+                calc::compile_document_with_env(&self.cells[i].source, input_env);
+            self.cell_envs[i] = out_env;
+
+            let world = &mut self.world;
+            let tc    = &mut self.tex_counter;
+            self.cells[i].rows = compiled.into_iter().map(|cl| {
+                if let Some(pd) = cl.plot_data {
+                    return RenderedRow { texture: None, error: None, comment: None,
+                        plot_data: Some(pd), table_data: None };
+                }
+                if let Some(td) = cl.table_data {
+                    return RenderedRow { texture: None, error: None, comment: None,
+                        plot_data: None, table_data: Some(td) };
+                }
+                if let Some(ref typst_src) = cl.typst_src {
+                    *tc += 1;
+                    match compile_typst(world, typst_src) {
+                        Ok(svg) => {
+                            let tex = rasterize(&svg, ctx, &format!("tex_{tc}"), 2.0);
+                            RenderedRow { texture: tex, error: None, comment: None,
+                                plot_data: None, table_data: None }
+                        }
+                        Err(e) => RenderedRow { texture: None, error: Some(e), comment: None,
+                            plot_data: None, table_data: None },
+                    }
+                } else {
+                    RenderedRow { texture: None, error: cl.error, comment: cl.comment,
+                        plot_data: None, table_data: None }
+                }
+            }).collect();
+        }
     }
 }
 
@@ -232,11 +258,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // Recompile dirty cells
-        for i in 0..self.cells.len() {
-            if self.cells[i].dirty {
-                self.recompile_cell(i, &ctx);
-            }
+        // Recompile from the first dirty cell onward (env chains)
+        if let Some(first_dirty) = (0..self.cells.len()).find(|&i| self.cells[i].dirty) {
+            self.recompile_from(first_dirty, &ctx);
         }
 
         // ── Toolbar ──────────────────────────────────────────────────────────
@@ -244,6 +268,7 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 if ui.button("⊞  Add cell").clicked() {
                     self.cells.push(Cell::new("# New cell\n"));
+                    self.cell_envs.push(Default::default());
                 }
                 ui.label(format!("  {} cells", self.cells.len()));
             });
@@ -296,13 +321,17 @@ impl eframe::App for App {
             }
 
             if let Some(i) = to_delete {
-                if self.cells.len() > 1 { self.cells.remove(i); }
+                if self.cells.len() > 1 {
+                    self.cells.remove(i);
+                    self.cell_envs.remove(i);
+                    // mark from deletion point onward
+                    for j in i..self.cells.len() { self.cells[j].dirty = true; }
+                }
             }
             if let Some((a, b)) = swap {
                 self.cells.swap(a, b);
-                // Mark both dirty so textures regenerate with correct IDs
-                self.cells[a].dirty = true;
-                self.cells[b].dirty = true;
+                self.cell_envs.swap(a, b);
+                for j in a..self.cells.len() { self.cells[j].dirty = true; }
             }
         });
     }
@@ -402,11 +431,15 @@ fn main() -> eframe::Result<()> {
             let mut visuals = egui::Visuals::light();
             visuals.text_cursor.stroke.color = egui::Color32::BLACK;
             visuals.text_cursor.stroke.width = 2.0;
-            // Pure white backgrounds everywhere
-            let white = egui::Color32::WHITE;
-            visuals.panel_fill           = white;
-            visuals.window_fill          = white;
-            visuals.extreme_bg_color     = white;
+            let white  = egui::Color32::WHITE;
+            let near_w = egui::Color32::from_gray(248);
+            visuals.panel_fill                              = white;
+            visuals.window_fill                             = white;
+            visuals.extreme_bg_color                        = near_w;
+            visuals.faint_bg_color                          = near_w;
+            visuals.code_bg_color                           = near_w;
+            visuals.widgets.noninteractive.bg_fill          = white;
+            visuals.widgets.inactive.bg_fill                = near_w;
             cc.egui_ctx.set_visuals(visuals);
             Ok(Box::new(App::new()))
         }),

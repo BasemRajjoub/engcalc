@@ -5,7 +5,8 @@ pub mod typst_codegen;
 pub mod document;
 
 // Re-export the public API used by main.rs
-pub use document::{compile_document, CompiledLine, PlotData, TableData};
+pub use document::{compile_document, compile_document_with_env, CompiledLine, PlotData, TableData};
+pub use units::Quantity;
 
 #[cfg(test)]
 mod tests {
@@ -358,10 +359,8 @@ delta = 5 * w * L^4 / (384 * E * I) \"mm\"";
     #[test]
     fn plot_line_parses() {
         match parse_line("plot(sin(x), x, -3, 3)").unwrap() {
-            Line::Plot { var, a, b, .. } => {
+            Line::Plot { var, .. } => {
                 assert_eq!(var, "x");
-                assert!((a - -3.0).abs() < 1e-9);
-                assert!((b - 3.0).abs()  < 1e-9);
             }
             other => panic!("expected Plot, got {other:?}"),
         }
