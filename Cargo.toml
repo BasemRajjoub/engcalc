@@ -16,3 +16,4 @@ typst            = "0.14"
 typst-kit        = { version = "0.14.2", features = ["embed-fonts"] }
 comemo           = "0.4"
 egui_commonmark  = "0.23"
+egui_plot        = "0.35"

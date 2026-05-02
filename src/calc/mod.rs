@@ -5,7 +5,7 @@ pub mod typst_codegen;
 pub mod document;
 
 // Re-export the public API used by main.rs
-pub use document::{compile_document, CompiledLine};
+pub use document::{compile_document, CompiledLine, PlotData, TableData};
 
 #[cfg(test)]
 mod tests {
@@ -351,5 +351,56 @@ w = 5 \"N/mm\"
 M_max = w * L^2 / 8 \"N·mm\"
 delta = 5 * w * L^4 / (384 * E * I) \"mm\"";
         assert_all_ok(doc);
+    }
+
+    // ── plot parsing ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn plot_line_parses() {
+        match parse_line("plot(sin(x), x, -3, 3)").unwrap() {
+            Line::Plot { var, a, b, .. } => {
+                assert_eq!(var, "x");
+                assert!((a - -3.0).abs() < 1e-9);
+                assert!((b - 3.0).abs()  < 1e-9);
+            }
+            other => panic!("expected Plot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plot_samples_correctly() {
+        let lines = compile_document("plot(x^2, x, 0, 1)");
+        assert_eq!(lines.len(), 1);
+        let pd = lines[0].plot_data.as_ref().expect("expected plot_data");
+        // f(0)=0, f(1)=1
+        let first = pd.points.first().unwrap();
+        let last  = pd.points.last().unwrap();
+        assert!(first[1].abs() < 1e-9, "f(0)={}", first[1]);
+        assert!((last[1] - 1.0).abs() < 1e-6, "f(1)={}", last[1]);
+    }
+
+    // ── table parsing ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn table_rows_parse() {
+        let src = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+        let lines = compile_document(src);
+        // All table rows should collapse into one CompiledLine with table_data
+        let td_line = lines.iter().find(|l| l.table_data.is_some())
+            .expect("no table_data");
+        let td = td_line.table_data.as_ref().unwrap();
+        assert_eq!(td.header, vec!["A", "B"]);
+        assert_eq!(td.rows.len(), 2);
+        assert_eq!(td.rows[0], vec!["1", "2"]);
+    }
+
+    #[test]
+    fn table_no_separator_required() {
+        let src = "| X | Y |\n| 10 | 20 |";
+        let lines = compile_document(src);
+        let td = lines.iter().find(|l| l.table_data.is_some())
+            .and_then(|l| l.table_data.as_ref()).expect("no table");
+        assert_eq!(td.header, vec!["X", "Y"]);
+        assert_eq!(td.rows[0], vec!["10", "20"]);
     }
 }
