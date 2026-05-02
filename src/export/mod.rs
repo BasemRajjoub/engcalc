@@ -1,5 +1,6 @@
 mod omml;
 mod docx_writer;
+mod latex;
 pub mod html;
 
 use std::collections::HashMap;

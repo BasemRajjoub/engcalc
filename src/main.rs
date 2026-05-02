@@ -312,7 +312,7 @@ impl eframe::App for App {
                     }
                     if ui.button("🌐  Export .html").clicked() {
                         let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
-                        let html = export::html::export_html(&sources, &mut self.world);
+                        let html = export::html::export_html(&sources);
                         save_file(html.into_bytes(), "eqgui_export.html", "HTML file (*.html)|*.html");
                     }
                 });
