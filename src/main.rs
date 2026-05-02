@@ -242,10 +242,10 @@ impl eframe::App for App {
         // ── Toolbar ──────────────────────────────────────────────────────────
         egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("＋ Add cell").clicked() {
+                if ui.button("⊞  Add cell").clicked() {
                     self.cells.push(Cell::new("# New cell\n"));
                 }
-                ui.label(format!("{} cells", self.cells.len()));
+                ui.label(format!("  {} cells", self.cells.len()));
             });
         });
 
@@ -265,15 +265,15 @@ impl eframe::App for App {
                 frame.show(ui, |ui| {
                     // ── Cell header bar ──────────────────────────────────────
                     ui.horizontal(|ui| {
-                        ui.label(format!("▦ Cell {}", ci + 1));
+                        ui.label(format!("▦  Cell {}", ci + 1));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").on_hover_text("Delete cell").clicked() {
+                            if ui.small_button("🗑").on_hover_text("Delete cell").clicked() {
                                 to_delete = Some(ci);
                             }
-                            if ci + 1 < n && ui.small_button("↓").on_hover_text("Move down").clicked() {
+                            if ci + 1 < n && ui.small_button("⬇").on_hover_text("Move down").clicked() {
                                 swap = Some((ci, ci + 1));
                             }
-                            if ci > 0 && ui.small_button("↑").on_hover_text("Move up").clicked() {
+                            if ci > 0 && ui.small_button("⬆").on_hover_text("Move up").clicked() {
                                 swap = Some((ci - 1, ci));
                             }
                         });
@@ -282,25 +282,15 @@ impl eframe::App for App {
 
                     // ── Split: editor left, output right ─────────────────────
                     ui.columns(2, |cols| {
-                        egui::ScrollArea::vertical()
-                            .max_height(300.0)
-                            .id_salt(format!("ed_{ci}"))
-                            .show(&mut cols[0], |ui| {
-                                let resp = ui.add(
-                                    egui::TextEdit::multiline(&mut self.cells[ci].source)
-                                        .desired_width(f32::INFINITY)
-                                        .font(egui::TextStyle::Monospace),
-                                );
-                                if resp.changed() { self.cells[ci].dirty = true; }
-                            });
+                        let resp = cols[0].add(
+                            egui::TextEdit::multiline(&mut self.cells[ci].source)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if resp.changed() { self.cells[ci].dirty = true; }
 
                         let panel_w = cols[1].available_width();
-                        egui::ScrollArea::vertical()
-                            .max_height(300.0)
-                            .id_salt(format!("out_{ci}"))
-                            .show(&mut cols[1], |ui| {
-                                render_rows(ui, &self.cells[ci].rows, &mut self.md_cache, panel_w, ci);
-                            });
+                        render_rows(&mut cols[1], &self.cells[ci].rows, &mut self.md_cache, panel_w, ci);
                     });
                 });
             }
@@ -412,6 +402,11 @@ fn main() -> eframe::Result<()> {
             let mut visuals = egui::Visuals::light();
             visuals.text_cursor.stroke.color = egui::Color32::BLACK;
             visuals.text_cursor.stroke.width = 2.0;
+            // Pure white backgrounds everywhere
+            let white = egui::Color32::WHITE;
+            visuals.panel_fill           = white;
+            visuals.window_fill          = white;
+            visuals.extreme_bg_color     = white;
             cc.egui_ctx.set_visuals(visuals);
             Ok(Box::new(App::new()))
         }),
