@@ -447,17 +447,37 @@ fn render_table(ui: &mut egui::Ui, td: &calc::document::TableData) {
 }
 
 fn save_docx(bytes: Vec<u8>) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let path = format!("eqgui_export_{ts}.docx");
+    // Windows Save-As dialog via PowerShell
+    let ps = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$d = New-Object System.Windows.Forms.SaveFileDialog
+$d.Title = 'Export as Word document'
+$d.Filter = 'Word Document (*.docx)|*.docx'
+$d.FileName = 'eqgui_export.docx'
+if ($d.ShowDialog() -eq 'OK') { $d.FileName } else { '' }
+"#;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output();
+
+    let path = match output {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { return; } // user cancelled
+            s
+        }
+        Err(_) => {
+            // Fallback: save next to exe
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            format!("eqgui_export_{ts}.docx")
+        }
+    };
+
     if let Err(e) = std::fs::write(&path, &bytes) {
         eprintln!("Export failed: {e}");
     } else {
-        // Open with default app (Word)
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", "", &path])
-            .spawn();
-        eprintln!("Exported: {path}");
+        let _ = std::process::Command::new("cmd").args(["/c", "start", "", &path]).spawn();
     }
 }
 

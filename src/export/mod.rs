@@ -2,7 +2,6 @@ mod omml;
 mod docx_writer;
 
 use std::collections::HashMap;
-use resvg::{tiny_skia, usvg};
 use crate::calc::{self, Quantity, parse_unit};
 use crate::calc::document::{parse_line, Line};
 use crate::plot_svg::render_plot_svg;
@@ -77,30 +76,12 @@ fn flush_plots(mut builder: DocxBuilder, plots: &mut Vec<calc::document::PlotDat
     if plots.is_empty() { return builder; }
     let refs: Vec<&calc::document::PlotData> = plots.iter().collect();
     let svg = render_plot_svg(&refs);
-    if let Some((png, w, h)) = svg_to_png(&svg, 2.0) {
-        // Scale down for document: max 450px wide at 96dpi
-        let max_w = 450u32;
-        let dw = w.min(max_w);
-        let dh = (h as f64 * dw as f64 / w as f64) as u32;
-        builder = builder.image(png, dw, dh);
+    if !svg.is_empty() {
+        // Our SVG canvas is 520×280 user units — treat as points
+        builder = builder.svg_image(svg.into_bytes(), 520, 280);
     }
     plots.clear();
     builder
-}
-
-fn svg_to_png(svg: &str, scale: f32) -> Option<(Vec<u8>, u32, u32)> {
-    let mut opts = usvg::Options::default();
-    opts.fontdb = crate::svg_fontdb();
-    let tree = usvg::Tree::from_str(svg, &opts).ok()?;
-    let sz = tree.size();
-    let w = (sz.width()  * scale) as u32;
-    let h = (sz.height() * scale) as u32;
-    if w == 0 || h == 0 { return None; }
-    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
-    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    let png = pixmap.encode_png().ok()?;
-    // Return logical (unscaled) dimensions for EMU calculation
-    Some((png, (sz.width() as u32), (sz.height() as u32)))
 }
 
 /// Re-parse a source line and build OMML from expr + evaluated result.
