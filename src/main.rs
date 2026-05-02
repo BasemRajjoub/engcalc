@@ -305,11 +305,6 @@ impl eframe::App for App {
                 ui.label(format!("  {} cells", self.cells.len()));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("📄  Export .docx").clicked() {
-                        let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
-                        let docx_bytes = export::export_docx(&sources);
-                        save_file(docx_bytes, "eqgui_export.docx", "Word Document (*.docx)|*.docx");
-                    }
                     if ui.button("🌐  Export .html").clicked() {
                         let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
                         let html = export::html::export_html(&sources);
