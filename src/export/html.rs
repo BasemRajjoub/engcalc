@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use crate::calc::{self, Quantity, parse_unit};
 use crate::calc::document::{parse_line, Line, PlotData};
-use crate::plot_svg::render_plot_svg;
 use super::latex;
 
 pub fn export_html(cells: &[String]) -> String {
@@ -33,19 +32,18 @@ pub fn export_html(cells: &[String]) -> String {
             }
 
             if let Some(text) = cl.comment {
-                let clean = text.trim_start_matches('#').trim().to_string();
-                body.push_str(&format!("<h2>{}</h2>\n", esc(&clean)));
+                body.push_str(&format!("<h2>{}</h2>\n", esc(&text)));
                 continue;
             }
 
             if let Some(err) = cl.error {
-                body.push_str(&format!("<p class='error'>⚠ {}</p>\n", esc(&err)));
+                body.push_str(&format!("<p class='error'>&#9888; {}</p>\n", esc(&err)));
                 continue;
             }
 
             if cl.typst_src.is_some() {
                 if let Some(tex) = source_to_latex(&cl.source_line, &env) {
-                    body.push_str(&format!("<div class='eq'>\\[{tex}\\]</div>\n"));
+                    body.push_str(&format!("<div class='eq'>\\[{}\\]</div>\n", tex));
                 }
             }
         }
@@ -55,16 +53,50 @@ pub fn export_html(cells: &[String]) -> String {
     wrap_html(&body)
 }
 
+static CHART_COLORS: &[&str] = &[
+    "rgb(37,99,235)",
+    "rgb(220,38,38)",
+    "rgb(22,163,74)",
+    "rgb(217,119,6)",
+    "rgb(147,51,234)",
+    "rgb(6,182,212)",
+];
+
 fn flush_plots(plots: &mut Vec<PlotData>, body: &mut String) {
     if plots.is_empty() { return; }
-    let refs: Vec<&PlotData> = plots.iter().collect();
-    let svg = render_plot_svg(&refs);
-    if !svg.is_empty() {
-        body.push_str("<figure class='plot'>");
-        body.push_str(&svg);
-        body.push_str("</figure>\n");
+
+    let chart_id = format!("chart{}", body.len());
+
+    // Build datasets JSON
+    let mut datasets = String::from("[");
+    for (i, pd) in plots.iter().enumerate() {
+        let color = CHART_COLORS[i % CHART_COLORS.len()];
+        let pts: String = pd.points.iter()
+            .map(|[x, y]| format!("{{x:{},y:{}}}", x, y))
+            .collect::<Vec<_>>()
+            .join(",");
+        if i > 0 { datasets.push(','); }
+        datasets.push_str(&format!(
+            "{{label:{},borderColor:'{}',backgroundColor:'transparent',data:[{}],pointRadius:0,borderWidth:2,tension:0.3}}",
+            serde_json_str(&pd.label), color, pts
+        ));
     }
+    datasets.push(']');
+
+    body.push_str(&format!(
+        "<figure class='plot'><canvas id='{}'></canvas>\
+<script>new Chart(document.getElementById('{}'),{{type:'line',data:{{datasets:{}}},\
+options:{{animation:false,scales:{{x:{{type:'linear',title:{{display:false}}}},\
+y:{{title:{{display:false}}}}}},plugins:{{legend:{{display:{}}}}}}}}});</script></figure>\n",
+        chart_id, chart_id, datasets,
+        if plots.len() > 1 { "true" } else { "false" }
+    ));
+
     plots.clear();
+}
+
+fn serde_json_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "\\'"))
 }
 
 fn source_to_latex(src: &str, env: &HashMap<String, Quantity>) -> Option<String> {
@@ -91,126 +123,68 @@ fn unit_val(q: &Quantity, unit: &str) -> f64 {
 }
 
 fn wrap_html(body: &str) -> String {
-    format!(r##"<!DOCTYPE html>
+    format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>eqgui report</title>
-
-<!-- MathJax 3 — renders LaTeX equations -->
-<script>
-MathJax = {{
-  tex: {{
-    inlineMath: [['\\(','\\)']],
-    displayMath: [['\\[','\\]']],
-    tags: 'ams'
-  }},
-  svg: {{ fontCache: 'global' }},
-  startup: {{
-    ready() {{
-      MathJax.startup.defaultReady();
-      // trigger paged.js after MathJax finishes
-      MathJax.startup.promise.then(() => {{
-        if (window.PagedPolyfill) window.PagedPolyfill.preview();
-      }});
-    }}
-  }}
-}};
-</script>
-<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
-
-<!-- paged.js — A4 pagination, headers, page numbers -->
-<script src="https://unpkg.com/pagedjs/dist/paged.polyfill.js"></script>
-
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>document.addEventListener("DOMContentLoaded",function(){{
+  renderMathInElement(document.body,{{delimiters:[{{left:"\\\\[",right:"\\\\]",display:true}},{{left:"\\\\(",right:"\\\\)",display:false}}]}});
+}});</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
-/* ── Page layout (paged.js) ─────────────────────────────── */
-@page {{
-  size: A4;
-  margin: 20mm 22mm 25mm 22mm;
-
-  @top-center {{
-    content: "eqgui calculation report";
-    font-size: 9pt;
-    color: #6b7280;
-    font-family: 'Segoe UI', sans-serif;
-  }}
-  @bottom-right {{
-    content: "Page " counter(page) " of " counter(pages);
-    font-size: 9pt;
-    color: #6b7280;
-    font-family: 'Segoe UI', sans-serif;
-  }}
-}}
-
-/* ── Base typography ─────────────────────────────────────── */
 body {{
   font-family: 'Segoe UI', system-ui, sans-serif;
   font-size: 11pt;
-  line-height: 1.55;
+  line-height: 1.6;
   color: #1a1a1a;
   background: #fff;
-  max-width: none;
-  margin: 0;
-  padding: 0;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 32px 24px;
 }}
-
 h2 {{
   font-size: 14pt;
   font-weight: 700;
   color: #1a3a5c;
-  border-bottom: 1.5pt solid #2563eb;
-  padding-bottom: 2pt;
-  margin: 18pt 0 8pt;
-  break-after: avoid;
+  border-bottom: 1.5px solid #2563eb;
+  padding-bottom: 3px;
+  margin: 24px 0 10px;
 }}
-
-/* ── Equations ───────────────────────────────────────────── */
 .eq {{
   text-align: center;
-  margin: 5pt 0;
-  break-inside: avoid;
+  margin: 6px 0;
 }}
-
-/* ── Plots ───────────────────────────────────────────────── */
 figure.plot {{
-  margin: 12pt auto;
-  max-width: 480pt;
-  break-inside: avoid;
-  text-align: center;
+  margin: 16px auto;
+  max-width: 600px;
 }}
-figure.plot svg {{
+figure.plot canvas {{
   width: 100%;
-  height: auto;
-  display: block;
 }}
-
-/* ── Tables ──────────────────────────────────────────────── */
 table {{
   border-collapse: collapse;
   width: 100%;
-  margin: 8pt 0;
+  margin: 10px 0;
   font-size: 10pt;
-  break-inside: avoid;
 }}
 th, td {{
-  border: 0.5pt solid #d1d5db;
-  padding: 4pt 10pt;
+  border: 1px solid #d1d5db;
+  padding: 5px 12px;
   text-align: left;
 }}
-th {{
-  background: #f3f4f6;
-  font-weight: 600;
-}}
+th {{ background: #f3f4f6; font-weight: 600; }}
 tr:nth-child(even) td {{ background: #f9fafb; }}
-
-/* ── Errors ──────────────────────────────────────────────── */
 .error {{ color: #dc2626; font-size: 9pt; }}
 </style>
 </head>
 <body>
 {body}
 </body>
-</html>"##)
+</html>"#)
 }
 
 fn esc(s: &str) -> String {
