@@ -1,5 +1,12 @@
 use crate::calc::ast::{BinOp, Expr};
-use crate::calc::typst_codegen::fmt_num;
+
+pub fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e10 {
+        format!("{}", v as i64)
+    } else {
+        format!("{:.4}", v).trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
 
 pub fn expr_to_latex(expr: &Expr) -> String {
     node(expr, Prec::Top)
@@ -113,7 +120,6 @@ fn call(name: &str, args: &[Expr]) -> String {
     }
 }
 
-/// Variable name → LaTeX: f_y → f_{y}, multi-char → \mathrm{...}
 fn ident(name: &str) -> String {
     if let Some(idx) = name.find('_') {
         let base = &name[..idx];
@@ -129,7 +135,6 @@ fn ident_base(s: &str) -> String {
     else { format!("\\mathrm{{{s}}}") }
 }
 
-/// Unit string → LaTeX: mm^2 → \text{mm}^2, N·mm → \text{N}{\cdot}\text{mm}
 fn latex_unit(unit: &str) -> String {
     let s = unit.replace('·', "\u{00B7}").replace('*', "\u{00B7}");
     let mut result = String::new();

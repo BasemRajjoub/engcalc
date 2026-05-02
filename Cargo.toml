@@ -8,12 +8,6 @@ name = "eqgui"
 path = "src/main.rs"
 
 [dependencies]
-eframe           = "0.34"
-egui             = "0.34"
-resvg            = "0.47"
-typst-svg        = "0.14"
-typst            = "0.14"
-typst-kit        = { version = "0.14.2", features = ["embed-fonts"] }
-comemo           = "0.4"
-egui_commonmark  = "0.23"
-fontdb           = "0.23"
+eframe       = "0.34"
+egui         = "0.34"
+resvg        = "0.47"

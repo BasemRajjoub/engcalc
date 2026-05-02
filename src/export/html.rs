@@ -1,54 +1,57 @@
-use std::collections::HashMap;
-use crate::calc::{self, Quantity, parse_unit};
-use crate::calc::document::{parse_line, Line, PlotData};
-use super::latex;
+use crate::calc;
+use crate::calc::document::PlotData;
 
-pub fn export_html(cells: &[String]) -> String {
+/// Export HTML with all equations pre-rendered to inline SVG.
+/// `latex_to_svg`: closure that converts a LaTeX string to an SVG string.
+pub fn export_html(source: &str, latex_to_svg: &mut dyn FnMut(&str) -> Option<String>) -> String {
     let mut body = String::new();
-    let mut env: HashMap<String, Quantity> = HashMap::new();
+    let mut pending_plots: Vec<PlotData> = Vec::new();
 
-    for cell_src in cells {
-        let mut pending_plots: Vec<PlotData> = Vec::new();
-        let (compiled, out_env) = calc::compile_document_with_env(cell_src, env.clone());
-        env = out_env;
+    let compiled = calc::compile_document(source);
 
-        for cl in compiled {
-            if cl.plot_data.is_none() {
-                flush_plots(&mut pending_plots, &mut body);
+    for cl in compiled {
+        if cl.plot_data.is_none() {
+            flush_plots(&mut pending_plots, &mut body);
+        }
+        if let Some(pd) = cl.plot_data { pending_plots.push(pd); continue; }
+
+        if let Some(td) = cl.table_data {
+            body.push_str("<table><thead><tr>");
+            for h in &td.header { body.push_str(&format!("<th>{}</th>", esc(h))); }
+            body.push_str("</tr></thead><tbody>");
+            for row in &td.rows {
+                body.push_str("<tr>");
+                for cell in row { body.push_str(&format!("<td>{}</td>", esc(cell))); }
+                body.push_str("</tr>");
             }
-            if let Some(pd) = cl.plot_data { pending_plots.push(pd); continue; }
+            body.push_str("</tbody></table>\n");
+            continue;
+        }
 
-            if let Some(td) = cl.table_data {
-                body.push_str("<table><thead><tr>");
-                for h in &td.header { body.push_str(&format!("<th>{}</th>", esc(h))); }
-                body.push_str("</tr></thead><tbody>");
-                for row in &td.rows {
-                    body.push_str("<tr>");
-                    for cell in row { body.push_str(&format!("<td>{}</td>", esc(cell))); }
-                    body.push_str("</tr>");
+        if let Some(text) = cl.comment {
+            body.push_str(&format!("<h2>{}</h2>\n", esc(&text)));
+            continue;
+        }
+
+        if let Some(err) = cl.error {
+            body.push_str(&format!("<p class='error'>&#9888; {}</p>\n", esc(&err)));
+            continue;
+        }
+
+        if let Some(latex) = cl.latex {
+            match latex_to_svg(&latex) {
+                Some(svg) => {
+                    // Strip the outer SVG vertical-align style — let CSS handle centering
+                    let svg = svg.replace(r#"style="vertical-align:"#, r#"style="display:block;margin:auto;vertical-align:"#);
+                    body.push_str(&format!("<div class='eq'>{svg}</div>\n"));
                 }
-                body.push_str("</tbody></table>\n");
-                continue;
-            }
-
-            if let Some(text) = cl.comment {
-                body.push_str(&format!("<h2>{}</h2>\n", esc(&text)));
-                continue;
-            }
-
-            if let Some(err) = cl.error {
-                body.push_str(&format!("<p class='error'>&#9888; {}</p>\n", esc(&err)));
-                continue;
-            }
-
-            if cl.typst_src.is_some() {
-                if let Some(tex) = source_to_latex(&cl.source_line, &env) {
-                    body.push_str(&format!("<div class='eq'>\\[{}\\]</div>\n", tex));
+                None => {
+                    body.push_str(&format!("<p class='error'>&#9888; render failed: {}</p>\n", esc(&latex)));
                 }
             }
         }
-        flush_plots(&mut pending_plots, &mut body);
     }
+    flush_plots(&mut pending_plots, &mut body);
 
     wrap_html(&body)
 }
@@ -67,7 +70,6 @@ fn flush_plots(plots: &mut Vec<PlotData>, body: &mut String) {
 
     let chart_id = format!("chart{}", body.len());
 
-    // Build datasets JSON
     let mut datasets = String::from("[");
     for (i, pd) in plots.iter().enumerate() {
         let color = CHART_COLORS[i % CHART_COLORS.len()];
@@ -99,41 +101,15 @@ fn serde_json_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "\\'"))
 }
 
-fn source_to_latex(src: &str, env: &HashMap<String, Quantity>) -> Option<String> {
-    let trimmed = src.trim();
-    if trimmed.is_empty() { return None; }
-    match parse_line(trimmed).ok()? {
-        Line::Assignment { lhs, expr, unit } => {
-            let result = calc::eval_quantity(&expr, env).ok()?;
-            let val = unit_val(&result, &unit);
-            Some(latex::assignment_to_latex(&lhs, &expr, val, &unit))
-        }
-        Line::Eval { expr, unit } => {
-            let result = calc::eval_quantity(&expr, env).ok()?;
-            let val = unit_val(&result, &unit);
-            Some(latex::eval_to_latex(&expr, val, &unit))
-        }
-        _ => None,
-    }
-}
-
-fn unit_val(q: &Quantity, unit: &str) -> f64 {
-    if unit.is_empty() { q.si_val() }
-    else { parse_unit(unit).map(|(_, s)| q.si_val() / s).unwrap_or(q.val) }
-}
-
 fn wrap_html(body: &str) -> String {
+    // Chart.js from CDN — only needed if plots exist; tracking prevention only affects cookies/storage,
+    // not script loading. But to be safe, embed Chart.js inline if needed.
+    // For now use CDN; equations are inline SVG so no CDN needed for math.
     format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>eqgui report</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-<script>document.addEventListener("DOMContentLoaded",function(){{
-  renderMathInElement(document.body,{{delimiters:[{{left:"\\\\[",right:"\\\\]",display:true}},{{left:"\\\\(",right:"\\\\)",display:false}}]}});
-}});</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
 body {{
@@ -157,6 +133,10 @@ h2 {{
 .eq {{
   text-align: center;
   margin: 6px 0;
+}}
+.eq svg {{
+  max-width: 100%;
+  height: auto;
 }}
 figure.plot {{
   margin: 16px auto;

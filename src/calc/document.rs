@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use super::ast::{parse_expr, err, ParseError, Expr};
 use super::units::{parse_unit, infer_display_unit, Quantity};
 use super::eval::eval_q;
-use super::typst_codegen::{build_typst_line, build_typst_eval};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Document line types
@@ -14,9 +13,7 @@ pub enum Line {
     Blank,
     Assignment { lhs: String, expr: Expr, unit: String },
     Eval { expr: Expr, unit: String },
-    /// | col1 | col2 | ...  — markdown-style table row
     TableRow(Vec<String>),
-    /// plot(expr, var, a, b) or plot(expr, var, a, b, "label")
     Plot { expr: Expr, var: String, a_expr: Expr, b_expr: Expr, label: String },
 }
 
@@ -26,12 +23,10 @@ pub enum Line {
 
 pub struct CompiledLine {
     pub source_line: String,
-    pub typst_src:   Option<String>,
+    pub latex:       Option<String>,
     pub error:       Option<String>,
     pub comment:     Option<String>,
-    /// (x, y) point series for plot lines
     pub plot_data:   Option<PlotData>,
-    /// rows × cols string table
     pub table_data:  Option<TableData>,
 }
 
@@ -55,7 +50,6 @@ pub fn parse_line(src: &str) -> Result<Line, ParseError> {
     if trimmed.is_empty() { return Ok(Line::Blank); }
     if trimmed.starts_with('#') { return Ok(Line::Comment(trimmed[1..].trim().to_string())); }
 
-    // Table row: starts and ends with |
     if trimmed.starts_with('|') {
         let cells: Vec<String> = trimmed
             .split('|')
@@ -72,9 +66,7 @@ pub fn parse_line(src: &str) -> Result<Line, ParseError> {
         let (rhs, unit) = extract_unit(no_comment);
         let rhs = rhs.trim();
 
-        // Check for plot(expr, var, a, b) or plot(expr, var, a, b, "label")
-        // Strip optional trailing quoted label before parsing as expr
-        let (plot_rhs, plot_label) = extract_unit(rhs); // reuse unit extractor for quoted label
+        let (plot_rhs, plot_label) = extract_unit(rhs);
         let plot_rhs = plot_rhs.trim();
         if let Ok(Expr::Call(name, args)) = parse_expr(plot_rhs) {
             if name == "plot" && args.len() == 4 {
@@ -158,8 +150,6 @@ fn extract_unit(rhs: &str) -> (&str, String) {
 // Compile full document
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Compile source with an initial env (for cell chaining).
-/// Returns compiled lines + the final env (variables defined in this cell).
 pub fn compile_document_with_env(
     source: &str,
     initial_env: HashMap<String, Quantity>,
@@ -177,8 +167,11 @@ pub fn compile_document(source: &str) -> Vec<CompiledLine> {
     out
 }
 
+fn blank_line(src: String) -> CompiledLine {
+    CompiledLine { source_line: src, latex: None, error: None, comment: None, plot_data: None, table_data: None }
+}
+
 fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>, source: &str) {
-    // Accumulate table rows until a non-table line breaks the sequence
     let mut pending_table: Vec<Vec<String>> = Vec::new();
 
     let flush_table = |pending: &mut Vec<Vec<String>>, out: &mut Vec<CompiledLine>| {
@@ -191,7 +184,7 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
         };
         out.push(CompiledLine {
             source_line: String::new(),
-            typst_src: None, error: None, comment: None, plot_data: None,
+            latex: None, error: None, comment: None, plot_data: None,
             table_data: Some(TableData { header, rows: body }),
         });
     };
@@ -200,21 +193,20 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
         let src = raw_line.to_string();
         match parse_line(raw_line) {
             Ok(Line::TableRow(cells)) => {
-                // Skip separator rows like |---|---|
                 if cells.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')) {
                     continue;
                 }
                 pending_table.push(cells);
-                continue; // don't push to out yet
+                continue;
             }
             other => {
                 flush_table(&mut pending_table, &mut *out);
                 match other {
                     Ok(Line::Blank) => {
-                        out.push(CompiledLine { source_line: src, typst_src: None, error: None, comment: None, plot_data: None, table_data: None });
+                        out.push(blank_line(src));
                     }
                     Ok(Line::Comment(text)) => {
-                        out.push(CompiledLine { source_line: src, typst_src: None, error: None, comment: Some(text), plot_data: None, table_data: None });
+                        out.push(CompiledLine { source_line: src, latex: None, error: None, comment: Some(text), plot_data: None, table_data: None });
                     }
                     Ok(Line::Plot { expr, var, a_expr, b_expr, label }) => {
                         let a_res = eval_q(&a_expr, env).map(|q| q.si_val());
@@ -224,18 +216,18 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
                                 match sample_plot(&expr, &var, a, b, env, 200) {
                                     Ok(pts) => {
                                         out.push(CompiledLine {
-                                            source_line: src, typst_src: None, error: None, comment: None,
+                                            source_line: src, latex: None, error: None, comment: None,
                                             plot_data: Some(PlotData { label, points: pts, x_range: [a, b] }),
                                             table_data: None,
                                         });
                                     }
                                     Err(e) => {
-                                        out.push(CompiledLine { source_line: src, typst_src: None, error: Some(e), comment: None, plot_data: None, table_data: None });
+                                        out.push(CompiledLine { source_line: src, latex: None, error: Some(e), comment: None, plot_data: None, table_data: None });
                                     }
                                 }
                             }
                             _ => {
-                                out.push(CompiledLine { source_line: src, typst_src: None, error: Some("plot: could not evaluate range".into()), comment: None, plot_data: None, table_data: None });
+                                out.push(CompiledLine { source_line: src, latex: None, error: Some("plot: could not evaluate range".into()), comment: None, plot_data: None, table_data: None });
                             }
                         }
                     }
@@ -252,12 +244,12 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
                                         };
                                     }
                                 }
-                                let math_line = build_typst_eval(&expr, &env, &result, &unit);
-                                let typst = wrap_typst(&math_line);
-                                out.push(CompiledLine { source_line: src, typst_src: Some(typst), error: None, comment: None, plot_data: None, table_data: None });
+                                let val = result_display_val(&result, &unit);
+                                let tex = crate::export::latex::eval_to_latex(&expr, val, &unit);
+                                out.push(CompiledLine { source_line: src, latex: Some(tex), error: None, comment: None, plot_data: None, table_data: None });
                             }
                             Err(e) => {
-                                out.push(CompiledLine { source_line: src, typst_src: None, error: Some(e), comment: None, plot_data: None, table_data: None });
+                                out.push(CompiledLine { source_line: src, latex: None, error: Some(e), comment: None, plot_data: None, table_data: None });
                             }
                         }
                     }
@@ -281,18 +273,18 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
                                 } else {
                                     display_unit = String::new();
                                 }
-                                let math_line = build_typst_line(&lhs, &expr, &env, &result, &display_unit);
-                                let typst = wrap_typst(&math_line);
+                                let val = result.val;
+                                let tex = crate::export::latex::assignment_to_latex(&lhs, &expr, val, &display_unit);
                                 env.insert(lhs, result);
-                                out.push(CompiledLine { source_line: src, typst_src: Some(typst), error: None, comment: None, plot_data: None, table_data: None });
+                                out.push(CompiledLine { source_line: src, latex: Some(tex), error: None, comment: None, plot_data: None, table_data: None });
                             }
                             Err(e) => {
-                                out.push(CompiledLine { source_line: src, typst_src: None, error: Some(e), comment: None, plot_data: None, table_data: None });
+                                out.push(CompiledLine { source_line: src, latex: None, error: Some(e), comment: None, plot_data: None, table_data: None });
                             }
                         }
                     }
                     Err(e) => {
-                        out.push(CompiledLine { source_line: src, typst_src: None, error: Some(e.0), comment: None, plot_data: None, table_data: None });
+                        out.push(CompiledLine { source_line: src, latex: None, error: Some(e.0), comment: None, plot_data: None, table_data: None });
                     }
                     Ok(Line::TableRow(_)) => unreachable!(),
                 }
@@ -302,15 +294,10 @@ fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>
     flush_table(&mut pending_table, out);
 }
 
-fn wrap_typst(math: &str) -> String {
-    format!(
-        "#set page(width: auto, height: auto, margin: (x: 8pt, y: 4pt))\n\
-         #set text(size: 14pt)\n\
-         $ {math} $"
-    )
+fn result_display_val(result: &Quantity, unit: &str) -> f64 {
+    if unit.is_empty() { result.si_val() } else { result.val }
 }
 
-/// Sample expr over [a,b] with n_points, substituting var in env.
 fn sample_plot(
     expr: &Expr, var: &str, a: f64, b: f64,
     env: &HashMap<String, Quantity>, n: usize,

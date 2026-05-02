@@ -1,449 +1,424 @@
 mod calc;
-mod plot_svg;
 mod export;
 
 use eframe::egui;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use resvg::{tiny_skia, usvg};
-use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime};
-use typst::syntax::{FileId, Source, VirtualPath};
-use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
-use typst::{Library, LibraryExt, World};
-use typst_kit::fonts::FontSearcher;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, ChildStderr, Command, Stdio};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Typst World
+// Persistent Node/MathJax subprocess for LaTeX → SVG
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct MinimalWorld {
-    library: LazyHash<Library>,
-    book:    LazyHash<FontBook>,
-    fonts:   Vec<Font>,
-    source:  Source,
+struct MjProcess {
+    _child:  Child,
+    stdin:   ChildStdin,
+    stdout:  BufReader<ChildStdout>,
 }
 
-impl MinimalWorld {
-    fn new() -> Self {
-        eprintln!("Loading fonts…");
-        let searched = FontSearcher::new().include_system_fonts(false).search();
-        let fonts: Vec<Font> = searched.fonts.iter().flat_map(|s| s.get()).collect();
-        eprintln!("Fonts loaded.");
-        let fid = FileId::new(None, VirtualPath::new("/main.typ"));
-        Self {
-            library: LazyHash::new(Library::default()),
-            book:    LazyHash::new(searched.book),
-            fonts,
-            source:  Source::new(fid, String::new()),
+impl MjProcess {
+    fn start() -> Option<Self> {
+        let script = std::env::current_exe().ok()?
+            .parent()?
+            .join("mj.mjs");
+        let script = if script.exists() { script } else {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mj.mjs")
+        };
+        let mut child = Command::new("node")
+            .arg(&script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn().ok()?;
+        let stdin  = child.stdin.take()?;
+        let stdout = BufReader::new(child.stdout.take()?);
+        let mut stderr = BufReader::new(child.stderr.take()?);
+
+        // Wait for READY signal (MathJax init can take ~2s)
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match stderr.read_line(&mut line) {
+                Ok(0) => { eprintln!("[mj] process exited before READY"); return None; }
+                Ok(_) => { if line.contains("READY") { break; } }
+                Err(_) => return None,
+            }
         }
-    }
-    fn set_source(&mut self, src: &str) {
-        self.source.replace(src);
-        comemo::evict(30);
-    }
-}
 
-impl World for MinimalWorld {
-    fn library(&self) -> &LazyHash<Library> { &self.library }
-    fn book(&self)    -> &LazyHash<FontBook> { &self.book }
-    fn main(&self)    -> FileId              { self.source.id() }
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        if id == self.source.id() { Ok(self.source.clone()) }
-        else { Err(FileError::NotFound(id.vpath().as_rootless_path().into())) }
+        // Drain remaining stderr to avoid blocking
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                match stderr.read_line(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        Some(MjProcess { _child: child, stdin, stdout })
     }
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+
+    fn convert(&mut self, latex: &str) -> Option<String> {
+        let line = latex.replace('\n', " ");
+        writeln!(self.stdin, "{}", line).ok()?;
+        self.stdin.flush().ok()?;
+        let mut response = String::new();
+        self.stdout.read_line(&mut response).ok()?;
+        let response = response.trim_end_matches('\n').trim_end_matches('\r').to_string();
+        if response.starts_with("ERROR:") { return None; }
+        Some(response)
     }
-    fn font(&self, index: usize) -> Option<Font> { self.fonts.get(index).cloned() }
-    fn today(&self, _: Option<i64>) -> Option<Datetime> { Datetime::from_ymd(2025, 1, 1) }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render helpers
+// Math texture rendering via MathJax → SVG → resvg
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn compile_typst(world: &mut MinimalWorld, src: &str) -> Result<String, String> {
-    world.set_source(src);
-    let doc = typst::compile::<typst::layout::PagedDocument>(world)
-        .output
-        .map_err(|errs| errs.iter().map(|e| e.message.to_string()).collect::<Vec<_>>().join("; "))?;
-    Ok(typst_svg::svg_merged(&doc, typst::layout::Abs::pt(0.0)))
+struct RenderedEq {
+    texture: egui::TextureHandle,
+    width:   f32,
+    height:  f32,
 }
 
-fn svg_fontdb() -> std::sync::Arc<fontdb::Database> {
-    use std::sync::OnceLock;
-    static DB: OnceLock<std::sync::Arc<fontdb::Database>> = OnceLock::new();
-    DB.get_or_init(|| {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        std::sync::Arc::new(db)
-    }).clone()
-}
-
-fn rasterize(svg: &str, ctx: &egui::Context, id: &str, scale: f32) -> Option<(egui::TextureHandle, [f32; 2])> {
-    let mut opts = usvg::Options::default();
-    opts.fontdb = svg_fontdb();
-    let tree = usvg::Tree::from_str(svg, &opts).ok()?;
-    let sz = tree.size();
-    let w = (sz.width()  * scale) as u32;
-    let h = (sz.height() * scale) as u32;
+fn svg_to_texture(ctx: &egui::Context, svg: &str, name: &str, scale: f32) -> Option<RenderedEq> {
+    let svg_colored = svg.replace("currentColor", "#1a1a1a");
+    let opt = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg_colored, &opt).ok()?;
+    let size = tree.size().to_int_size();
+    let w = ((size.width()  as f32) * scale) as u32;
+    let h = ((size.height() as f32) * scale) as u32;
     if w == 0 || h == 0 { return None; }
     let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
     resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    let pixels = pixmap.pixels().iter()
-        .map(|p| egui::Color32::from_rgba_premultiplied(p.red(), p.green(), p.blue(), p.alpha()))
-        .collect();
-    let img = egui::ColorImage { size: [w as usize, h as usize], source_size: egui::Vec2::new(w as f32, h as f32), pixels };
-    let tex = ctx.load_texture(id, img, egui::TextureOptions::LINEAR);
-    Some((tex, [w as f32 / scale, h as f32 / scale]))
+    let img = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data());
+    let tex = ctx.load_texture(name.to_string(), img, egui::TextureOptions::LINEAR);
+    Some(RenderedEq { texture: tex, width: w as f32 / scale, height: h as f32 / scale })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Rendered row
+// Rendered preview row
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct RenderedRow {
-    texture:    Option<(egui::TextureHandle, [f32; 2])>,
-    error:      Option<String>,
-    comment:    Option<String>,
-    table_data: Option<calc::document::TableData>,
+enum PreviewRow {
+    Equation(RenderedEq),
+    Error(String),
+    Heading(String),
+    PlotGroup(Vec<calc::PlotData>),
+    Table(calc::TableData),
+    Blank,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cell — independent calculation block
+// Default document
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct Cell {
-    source: String,
-    rows:   Vec<RenderedRow>,
-    dirty:  bool,
-}
-
-impl Cell {
-    fn new(source: impl Into<String>) -> Self {
-        Self { source: source.into(), rows: Vec::new(), dirty: true }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Default document — split into cells
-// ─────────────────────────────────────────────────────────────────────────────
-
-const DEFAULT_CELLS: &[&str] = &[
-    // Cell 0 — section properties
-    "\
+const DEFAULT_DOC: &str = "\
 # Section properties
 b = 200 \"mm\"
 h = 400 \"mm\"
 A = b * h \"mm^2\"
 I = b * h^3 / 12 \"mm^4\"
 c = h / 2 \"mm\"
-W = I / c \"mm^3\"",
+W = I / c \"mm^3\"
 
-    // Cell 1 — material & loading
-    "\
 # Material & loading
 f_y = 250 \"MPa\"
 E = 200000 \"MPa\"
 L = 6000 \"mm\"
 w = 5 \"N/mm\"
-F = 45 \"kN\"",
+F = 45 \"kN\"
 
-    // Cell 2 — bending
-    "\
 # Beam bending
 M_max = w * L^2 / 8 \"N·mm\"
 M_Ed = F * L / 4 \"kN·m\"
 sigma = M_max / W \"MPa\"
-delta = 5 * w * L^4 / (384 * E * I) \"mm\"",
+delta = 5 * w * L^4 / (384 * E * I) \"mm\"
 
-    // Cell 3 — calculus
-    "\
 # Calculus
 x = 3
 dfdx = diff(x^3 + 2*x, x)
 A_circle = integrate(sqrt(1 - x^2), x, -1, 1)
-S_squares = sum(k^2, k, 1, 10)",
+S_squares = sum(k^2, k, 1, 10)
 
-    // Cell 4 — trig
-    "\
-# Trig
-theta = 0.7854
-hyp = sqrt(sin(theta)^2 + cos(theta)^2)",
-
-    // Cell 5 — plot (uses x defined in cell 3, theta from cell 4)
-    "\
 # Plots
 plot(sin(x), x, -6.28, 6.28) \"sin(x)\"
 plot(cos(x), x, -6.28, 6.28) \"cos(x)\"
-plot(x^2, x, -3, 3) \"x squared\"",
 
-    // Cell 6 — table
-    "\
 # Results table
 | Parameter | Value |
 |-----------|-------|
 | b | 200 mm |
 | h | 400 mm |
-| A | 80000 mm² |
-| I | 2.133e9 mm⁴ |",
-];
+| A | 80000 mm^2 |
+";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct App {
-    world:       MinimalWorld,
-    cells:       Vec<Cell>,
-    /// env exported by each cell (index i = env after cell i completes)
-    cell_envs:   Vec<std::collections::HashMap<String, calc::Quantity>>,
-    md_cache:    CommonMarkCache,
+    source:      String,
+    preview:     Vec<PreviewRow>,
+    dirty:       bool,
     tex_counter: usize,
+    mj:          Option<MjProcess>,
 }
 
 impl App {
     fn new() -> Self {
-        let world = MinimalWorld::new();
-        let n = DEFAULT_CELLS.len();
-        let cells = DEFAULT_CELLS.iter().map(|s| Cell::new(*s)).collect();
         Self {
-            world, cells,
-            cell_envs: vec![Default::default(); n],
-            md_cache: CommonMarkCache::default(),
+            source: DEFAULT_DOC.to_string(),
+            preview: Vec::new(),
+            dirty: true,
             tex_counter: 0,
+            mj: MjProcess::start(),
         }
     }
 
-    /// Recompile cell `ci` and all cells after it (env may have changed).
-    fn recompile_from(&mut self, ci: usize, ctx: &egui::Context) {
-        // Ensure cell_envs is same length as cells
-        self.cell_envs.resize_with(self.cells.len(), Default::default);
+    fn recompile(&mut self, ctx: &egui::Context) {
+        self.dirty = false;
+        let compiled = calc::compile_document(&self.source);
+        let mut rows: Vec<PreviewRow> = Vec::new();
+        let mut plot_group: Vec<calc::PlotData> = Vec::new();
 
-        for i in ci..self.cells.len() {
-            self.cells[i].dirty = false;
+        let flush_plots = |group: &mut Vec<calc::PlotData>, rows: &mut Vec<PreviewRow>| {
+            if group.is_empty() { return; }
+            rows.push(PreviewRow::PlotGroup(std::mem::take(group)));
+        };
 
-            // Build input env: env exported by previous cell, or empty for cell 0
-            let input_env = if i == 0 {
-                Default::default()
-            } else {
-                self.cell_envs[i - 1].clone()
-            };
-
-            let (compiled, out_env) =
-                calc::compile_document_with_env(&self.cells[i].source, input_env);
-            self.cell_envs[i] = out_env;
-
-            let world = &mut self.world;
-            let tc    = &mut self.tex_counter;
-
-            // Group consecutive plot lines into one SVG, emit other lines individually
-            let mut rows: Vec<RenderedRow> = Vec::new();
-            let mut plot_group: Vec<calc::document::PlotData> = Vec::new();
-
-            let flush_plots = |group: &mut Vec<calc::document::PlotData>, rows: &mut Vec<RenderedRow>, tc: &mut usize, ctx: &egui::Context| {
-                if group.is_empty() { return; }
-                let refs: Vec<&calc::document::PlotData> = group.iter().collect();
-                let svg = plot_svg::render_plot_svg(&refs);
-                *tc += 1;
-                let tex = rasterize(&svg, ctx, &format!("plot_{tc}"), 2.0);
-                rows.push(RenderedRow { texture: tex, error: None, comment: None, table_data: None });
-                group.clear();
-            };
-
-            for cl in compiled {
-                if let Some(pd) = cl.plot_data {
-                    plot_group.push(pd);
-                    continue;
-                }
-                flush_plots(&mut plot_group, &mut rows, tc, ctx);
-
-                if let Some(td) = cl.table_data {
-                    rows.push(RenderedRow { texture: None, error: None, comment: None, table_data: Some(td) });
-                } else if let Some(ref typst_src) = cl.typst_src {
-                    *tc += 1;
-                    match compile_typst(world, typst_src) {
-                        Ok(svg) => {
-                            let tex = rasterize(&svg, ctx, &format!("tex_{tc}"), 2.0);
-                            rows.push(RenderedRow { texture: tex, error: None, comment: None, table_data: None });
-                        }
-                        Err(e) => rows.push(RenderedRow { texture: None, error: Some(e), comment: None, table_data: None }),
-                    }
-                } else {
-                    rows.push(RenderedRow { texture: None, error: cl.error, comment: cl.comment, table_data: None });
-                }
+        for cl in compiled {
+            if cl.plot_data.is_none() {
+                flush_plots(&mut plot_group, &mut rows);
             }
-            flush_plots(&mut plot_group, &mut rows, tc, ctx);
-            self.cells[i].rows = rows;
+
+            if let Some(pd) = cl.plot_data {
+                plot_group.push(pd);
+                continue;
+            }
+
+            if let Some(td) = cl.table_data {
+                rows.push(PreviewRow::Table(td));
+                continue;
+            }
+
+            if let Some(text) = cl.comment {
+                rows.push(PreviewRow::Heading(text));
+                continue;
+            }
+
+            if let Some(err) = cl.error {
+                rows.push(PreviewRow::Error(err));
+                continue;
+            }
+
+            if let Some(latex) = cl.latex {
+                self.tex_counter += 1;
+                let name = format!("eq_{}", self.tex_counter);
+                let svg = self.mj.as_mut().and_then(|mj| mj.convert(&latex));
+                match svg.and_then(|s| svg_to_texture(ctx, &s, &name, 4.0)) {
+                    Some(eq) => rows.push(PreviewRow::Equation(eq)),
+                    None => rows.push(PreviewRow::Error(format!("render failed: {latex}"))),
+                }
+                continue;
+            }
+
+            if cl.source_line.trim().is_empty() {
+                rows.push(PreviewRow::Blank);
+            }
         }
+        flush_plots(&mut plot_group, &mut rows);
+        self.preview = rows;
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-
-        // Re-assert light theme every frame — prevents OS dark-mode from taking over
         ctx.set_theme(egui::Theme::Light);
-        ui.visuals_mut().panel_fill      = egui::Color32::WHITE;
-        ui.visuals_mut().extreme_bg_color = egui::Color32::from_gray(248);
-        ui.visuals_mut().window_fill     = egui::Color32::WHITE;
+        set_light_visuals(ui);
 
-        // Recompile from the first dirty cell onward (env chains)
-        if let Some(first_dirty) = (0..self.cells.len()).find(|&i| self.cells[i].dirty) {
-            self.recompile_from(first_dirty, &ctx);
+        if self.dirty {
+            self.recompile(&ctx);
         }
 
         // ── Toolbar ──────────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("toolbar").show_inside(ui, |ui| {
+        egui::Panel::top("toolbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("⊞  Add cell").clicked() {
-                    self.cells.push(Cell::new("# New cell\n"));
-                    self.cell_envs.push(Default::default());
-                }
-                ui.label(format!("  {} cells", self.cells.len()));
-
+                ui.heading("eqgui");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("🌐  Export .html").clicked() {
-                        let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
-                        let html = export::html::export_html(&sources);
+                    if ui.button("Export HTML").clicked() {
+                        let mj = &mut self.mj;
+                        let html = export::html::export_html(&self.source, &mut |latex| {
+                            mj.as_mut().and_then(|m| m.convert(latex))
+                        });
                         save_file(html.into_bytes(), "eqgui_export.html", "HTML file (*.html)|*.html");
                     }
                 });
             });
         });
 
-        // ── Main area: cells stacked vertically ──────────────────────────────
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let mut to_delete: Option<usize> = None;
-            let mut swap: Option<(usize, usize)> = None;
-            let n = self.cells.len();
+        // ── Split pane ────────────────────────────────────────────────────────
+        let available = ui.available_rect_before_wrap();
+        let split = available.width() * 0.45;
 
-            for ci in 0..n {
-                // Cell container
-                let frame = egui::Frame::new()
-                    .fill(egui::Color32::WHITE)
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(200)))
-                    .inner_margin(egui::Margin::same(6))
-                    .outer_margin(egui::Margin::symmetric(0, 4));
-
-                frame.show(ui, |ui| {
-                    // ── Cell header bar ──────────────────────────────────────
-                    ui.horizontal(|ui| {
-                        ui.label(format!("▦  Cell {}", ci + 1));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("🗑").on_hover_text("Delete cell").clicked() {
-                                to_delete = Some(ci);
-                            }
-                            if ci + 1 < n && ui.small_button("⬇").on_hover_text("Move down").clicked() {
-                                swap = Some((ci, ci + 1));
-                            }
-                            if ci > 0 && ui.small_button("⬆").on_hover_text("Move up").clicked() {
-                                swap = Some((ci - 1, ci));
-                            }
-                        });
-                    });
-                    ui.separator();
-
-                    // ── Split: editor left, output right ─────────────────────
-                    ui.columns(2, |cols| {
-                        let resp = cols[0].add(
-                            egui::TextEdit::multiline(&mut self.cells[ci].source)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if resp.changed() { self.cells[ci].dirty = true; }
-
-                        let panel_w = cols[1].available_width();
-                        render_rows(&mut cols[1], &self.cells[ci].rows, &mut self.md_cache, panel_w, ci);
-                    });
+        // Editor — left panel
+        egui::Panel::left("editor_panel")
+            .exact_size(split)
+            .resizable(true)
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::multiline(&mut self.source)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(40)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if resp.changed() { self.dirty = true; }
                 });
-            }
+            });
 
-            if let Some(i) = to_delete {
-                if self.cells.len() > 1 {
-                    self.cells.remove(i);
-                    self.cell_envs.remove(i);
-                    // mark from deletion point onward
-                    for j in i..self.cells.len() { self.cells[j].dirty = true; }
-                }
-            }
-            if let Some((a, b)) = swap {
-                self.cells.swap(a, b);
-                self.cell_envs.swap(a, b);
-                for j in a..self.cells.len() { self.cells[j].dirty = true; }
-            }
+        // Preview — right panel
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let panel_w = ui.available_width();
+                render_preview(ui, &self.preview, panel_w);
+            });
         });
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Render rows for one cell's output panel
+// Preview rendering
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn render_rows(
-    ui: &mut egui::Ui,
-    rows: &[RenderedRow],
-    md_cache: &mut CommonMarkCache,
-    panel_w: f32,
-    cell_idx: usize,
-) {
-    let max_w = 600.0_f32;
+fn render_preview(ui: &mut egui::Ui, rows: &[PreviewRow], panel_w: f32) {
+    let max_eq_w = (panel_w - 16.0).min(640.0);
 
-    for (i, row) in rows.iter().enumerate() {
-        let _ = (i, cell_idx);
+    for row in rows {
+        match row {
+            PreviewRow::Blank => { ui.add_space(6.0); }
 
-        // Table
-        if let Some(ref td) = row.table_data {
-            render_table(ui, td);
-            continue;
-        }
+            PreviewRow::Heading(text) => {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(text).size(15.0).strong().color(egui::Color32::from_rgb(26, 58, 92)));
+                ui.add(egui::Separator::default().spacing(4.0));
+            }
 
-        // Error
-        if let Some(ref err) = row.error {
-            ui.colored_label(egui::Color32::from_rgb(200, 50, 50), format!("⚠ {err}"));
-            ui.add_space(2.0);
-            continue;
-        }
+            PreviewRow::Error(err) => {
+                ui.colored_label(egui::Color32::from_rgb(200, 50, 50), format!("⚠ {err}"));
+                ui.add_space(2.0);
+            }
 
-        // Comment / heading
-        if let Some(ref text) = row.comment {
-            let src = text.as_str();
-            let md = if src.starts_with('#') { text.clone() } else { format!("# {text}") };
-            CommonMarkViewer::new().show(ui, md_cache, &md);
-            ui.add_space(2.0);
-            continue;
-        }
+            PreviewRow::Equation(eq) => {
+                let display_w = eq.width.min(max_eq_w);
+                let scale = display_w / eq.width;
+                let display_h = eq.height * scale;
+                ui.add_space(2.0);
+                ui.image((eq.texture.id(), egui::Vec2::new(display_w, display_h)));
+                ui.add_space(2.0);
+            }
 
-        // Math texture
-        if let Some((ref tex, size)) = row.texture {
-            let display_w = size[0].min(panel_w).min(max_w);
-            let scale     = display_w / size[0];
-            let display   = egui::Vec2::new(display_w, size[1] * scale);
-            ui.image((tex.id(), display));
+            PreviewRow::Table(td) => {
+                egui::Grid::new(format!("tbl_{:p}", td))
+                    .striped(true)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in &td.header { ui.strong(h); }
+                        ui.end_row();
+                        for row in &td.rows {
+                            for cell in row { ui.label(cell); }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+
+            PreviewRow::PlotGroup(plots) => {
+                draw_plot(ui, plots, panel_w - 16.0, 200.0);
+                ui.add_space(4.0);
+            }
         }
     }
 }
 
-fn render_table(ui: &mut egui::Ui, td: &calc::document::TableData) {
-    egui::Grid::new(format!("tbl_{:p}", td))
-        .striped(true)
-        .spacing([12.0, 4.0])
-        .show(ui, |ui| {
-            // Header
-            for h in &td.header {
-                ui.strong(h);
-            }
-            ui.end_row();
-            // Body
-            for row in &td.rows {
-                for cell in row {
-                    ui.label(cell);
-                }
-                ui.end_row();
-            }
-        });
+// ─────────────────────────────────────────────────────────────────────────────
+// Simple painter-based line plot (no egui_plot dependency)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn draw_plot(ui: &mut egui::Ui, plots: &[calc::PlotData], width: f32, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // Background
+    painter.rect_filled(rect, 4.0, egui::Color32::from_gray(252));
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::from_gray(200)), egui::StrokeKind::Outside);
+
+    if plots.is_empty() { return; }
+
+    // Compute data bounds across all series
+    let mut x_min = f64::MAX;
+    let mut x_max = f64::MIN;
+    let mut y_min = f64::MAX;
+    let mut y_max = f64::MIN;
+    for pd in plots {
+        for [x, y] in &pd.points {
+            if x.is_finite() { x_min = x_min.min(*x); x_max = x_max.max(*x); }
+            if y.is_finite() { y_min = y_min.min(*y); y_max = y_max.max(*y); }
+        }
+    }
+    if x_min >= x_max { x_max = x_min + 1.0; }
+    if y_min >= y_max { y_max = y_min + 1.0; }
+    let pad_y = (y_max - y_min) * 0.08;
+    y_min -= pad_y; y_max += pad_y;
+
+    let pad = 8.0_f32;
+    let plot_rect = egui::Rect::from_min_max(
+        rect.min + egui::Vec2::splat(pad),
+        rect.max - egui::Vec2::splat(pad),
+    );
+
+    let to_screen = |x: f64, y: f64| -> egui::Pos2 {
+        let fx = ((x - x_min) / (x_max - x_min)) as f32;
+        let fy = 1.0 - ((y - y_min) / (y_max - y_min)) as f32;
+        egui::Pos2::new(
+            plot_rect.min.x + fx * plot_rect.width(),
+            plot_rect.min.y + fy * plot_rect.height(),
+        )
+    };
+
+    let colors = [
+        egui::Color32::from_rgb(37, 99, 235),
+        egui::Color32::from_rgb(220, 38, 38),
+        egui::Color32::from_rgb(22, 163, 74),
+        egui::Color32::from_rgb(217, 119, 6),
+        egui::Color32::from_rgb(147, 51, 234),
+        egui::Color32::from_rgb(6, 182, 212),
+    ];
+
+    for (i, pd) in plots.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        let screen_pts: Vec<egui::Pos2> = pd.points.iter()
+            .filter(|[x, y]| x.is_finite() && y.is_finite())
+            .map(|[x, y]| to_screen(*x, *y))
+            .collect();
+        if screen_pts.len() >= 2 {
+            painter.add(egui::Shape::line(screen_pts, egui::Stroke::new(2.0, color)));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn set_light_visuals(ui: &mut egui::Ui) {
+    let white  = egui::Color32::WHITE;
+    let near_w = egui::Color32::from_gray(248);
+    ui.visuals_mut().panel_fill       = white;
+    ui.visuals_mut().extreme_bg_color = near_w;
+    ui.visuals_mut().window_fill      = white;
 }
 
 fn save_file(bytes: Vec<u8>, default_name: &str, filter: &str) {
@@ -484,17 +459,15 @@ fn save_file(bytes: Vec<u8>, default_name: &str, filter: &str) {
 
 fn main() -> eframe::Result<()> {
     eframe::run_native(
-        "eqgui — live calc",
+        "eqgui",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_title("eqgui — live calc")
+                .with_title("eqgui")
                 .with_inner_size([1200.0, 800.0]),
             ..Default::default()
         },
         Box::new(|cc| {
-            // Force light theme — overrides OS dark mode preference
             cc.egui_ctx.set_theme(egui::Theme::Light);
-
             let white  = egui::Color32::WHITE;
             let near_w = egui::Color32::from_gray(248);
             cc.egui_ctx.style_mut_of(egui::Theme::Light, |style| {
