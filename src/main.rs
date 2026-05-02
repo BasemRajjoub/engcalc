@@ -24,7 +24,7 @@ struct MinimalWorld {
 
 impl MinimalWorld {
     fn new() -> Self {
-        let searched = FontSearcher::new().search();
+        let searched = FontSearcher::new().include_system_fonts(false).search();
         let fonts: Vec<Font> = searched.fonts.iter().flat_map(|s| s.get()).collect();
         let fid = FileId::new(None, VirtualPath::new("/main.typ"));
         Self {

@@ -216,7 +216,7 @@ pub fn build_typst_line(
     let unit_str = if unit.is_empty() {
         String::new()
     } else {
-        format!(" {}", format_unit_typst(unit))
+        format!(" thin {}", format_unit_typst(unit))
     };
     let lhs_t = typst_ident(lhs);
 
@@ -239,7 +239,7 @@ pub fn build_typst_eval(
     let unit_str = if unit.is_empty() {
         String::new()
     } else {
-        format!(" {}", format_unit_typst(unit))
+        format!(" thin {}", format_unit_typst(unit))
     };
 
     if matches!(expr, Expr::Num(_)) {
