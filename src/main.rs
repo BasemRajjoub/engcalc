@@ -308,7 +308,12 @@ impl eframe::App for App {
                     if ui.button("📄  Export .docx").clicked() {
                         let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
                         let docx_bytes = export::export_docx(&sources);
-                        save_docx(docx_bytes);
+                        save_file(docx_bytes, "eqgui_export.docx", "Word Document (*.docx)|*.docx");
+                    }
+                    if ui.button("🌐  Export .html").clicked() {
+                        let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
+                        let html = export::html::export_html(&sources, &mut self.world);
+                        save_file(html.into_bytes(), "eqgui_export.html", "HTML file (*.html)|*.html");
                     }
                 });
             });
@@ -446,31 +451,28 @@ fn render_table(ui: &mut egui::Ui, td: &calc::document::TableData) {
         });
 }
 
-fn save_docx(bytes: Vec<u8>) {
-    // Windows Save-As dialog via PowerShell
-    let ps = r#"
-Add-Type -AssemblyName System.Windows.Forms
-$d = New-Object System.Windows.Forms.SaveFileDialog
-$d.Title = 'Export as Word document'
-$d.Filter = 'Word Document (*.docx)|*.docx'
-$d.FileName = 'eqgui_export.docx'
-if ($d.ShowDialog() -eq 'OK') { $d.FileName } else { '' }
-"#;
+fn save_file(bytes: Vec<u8>, default_name: &str, filter: &str) {
+    let ps = format!(
+        "Add-Type -AssemblyName System.Windows.Forms\n\
+         $d = New-Object System.Windows.Forms.SaveFileDialog\n\
+         $d.Filter = '{filter}'\n\
+         $d.FileName = '{default_name}'\n\
+         if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }} else {{ '' }}"
+    );
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", ps])
+        .args(["-NoProfile", "-Command", &ps])
         .output();
 
     let path = match output {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { return; } // user cancelled
+            if s.is_empty() { return; }
             s
         }
         Err(_) => {
-            // Fallback: save next to exe
             use std::time::{SystemTime, UNIX_EPOCH};
             let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            format!("eqgui_export_{ts}.docx")
+            format!("{default_name}_{ts}")
         }
     };
 

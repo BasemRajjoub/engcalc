@@ -46,6 +46,17 @@ impl DocxBuilder {
         self
     }
 
+    /// Embed PNG — width/height in logical pixels, scaled to max 450pt in document
+    pub fn image(mut self, png: Vec<u8>, width_px: u32, height_px: u32) -> Self {
+        let id = format!("rId{}", self.images.len() + 10);
+        let max_emu: u32 = 450 * 12700;
+        let w_emu = (width_px * 9525).min(max_emu);
+        let h_emu = (height_px as f64 * w_emu as f64 / (width_px * 9525) as f64) as u32;
+        self.paragraphs.push(DocxPara::Image(id.clone(), w_emu, h_emu));
+        self.images.push(ImageEntry { id, bytes: png, is_svg: false, w_emu, h_emu });
+        self
+    }
+
     /// Embed SVG — width/height in SVG user units (will be scaled to max 450pt wide)
     pub fn svg_image(mut self, svg_bytes: Vec<u8>, width_pt: u32, height_pt: u32) -> Self {
         let id = format!("rId{}", self.images.len() + 10);
