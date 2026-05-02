@@ -258,6 +258,12 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // Re-assert light theme every frame — prevents OS dark-mode from taking over
+        ctx.set_theme(egui::Theme::Light);
+        ui.visuals_mut().panel_fill      = egui::Color32::WHITE;
+        ui.visuals_mut().extreme_bg_color = egui::Color32::from_gray(248);
+        ui.visuals_mut().window_fill     = egui::Color32::WHITE;
+
         // Recompile from the first dirty cell onward (env chains)
         if let Some(first_dirty) = (0..self.cells.len()).find(|&i| self.cells[i].dirty) {
             self.recompile_from(first_dirty, &ctx);
@@ -283,6 +289,7 @@ impl eframe::App for App {
             for ci in 0..n {
                 // Cell container
                 let frame = egui::Frame::new()
+                    .fill(egui::Color32::WHITE)
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(200)))
                     .inner_margin(egui::Margin::same(6))
                     .outer_margin(egui::Margin::symmetric(0, 4));
@@ -428,19 +435,23 @@ fn main() -> eframe::Result<()> {
             ..Default::default()
         },
         Box::new(|cc| {
-            let mut visuals = egui::Visuals::light();
-            visuals.text_cursor.stroke.color = egui::Color32::BLACK;
-            visuals.text_cursor.stroke.width = 2.0;
+            // Force light theme — overrides OS dark mode preference
+            cc.egui_ctx.set_theme(egui::Theme::Light);
+
             let white  = egui::Color32::WHITE;
             let near_w = egui::Color32::from_gray(248);
-            visuals.panel_fill                              = white;
-            visuals.window_fill                             = white;
-            visuals.extreme_bg_color                        = near_w;
-            visuals.faint_bg_color                          = near_w;
-            visuals.code_bg_color                           = near_w;
-            visuals.widgets.noninteractive.bg_fill          = white;
-            visuals.widgets.inactive.bg_fill                = near_w;
-            cc.egui_ctx.set_visuals(visuals);
+            cc.egui_ctx.style_mut_of(egui::Theme::Light, |style| {
+                style.visuals.text_cursor.stroke.color         = egui::Color32::BLACK;
+                style.visuals.text_cursor.stroke.width         = 2.0;
+                style.visuals.panel_fill                       = white;
+                style.visuals.window_fill                      = white;
+                style.visuals.extreme_bg_color                 = near_w;
+                style.visuals.faint_bg_color                   = near_w;
+                style.visuals.code_bg_color                    = near_w;
+                style.visuals.widgets.noninteractive.bg_fill   = white;
+                style.visuals.widgets.inactive.bg_fill         = near_w;
+                style.visuals.widgets.open.bg_fill             = white;
+            });
             Ok(Box::new(App::new()))
         }),
     )

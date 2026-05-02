@@ -177,7 +177,7 @@ pub fn compile_document(source: &str) -> Vec<CompiledLine> {
     out
 }
 
-fn compile_into(env: &mut HashMap<String, Quantity>, mut out: &mut Vec<CompiledLine>, source: &str) {
+fn compile_into(env: &mut HashMap<String, Quantity>, out: &mut Vec<CompiledLine>, source: &str) {
     // Accumulate table rows until a non-table line breaks the sequence
     let mut pending_table: Vec<Vec<String>> = Vec::new();
 
@@ -208,7 +208,7 @@ fn compile_into(env: &mut HashMap<String, Quantity>, mut out: &mut Vec<CompiledL
                 continue; // don't push to out yet
             }
             other => {
-                flush_table(&mut pending_table, &mut out);
+                flush_table(&mut pending_table, &mut *out);
                 match other {
                     Ok(Line::Blank) => {
                         out.push(CompiledLine { source_line: src, typst_src: None, error: None, comment: None, plot_data: None, table_data: None });
