@@ -1,3 +1,2 @@
-# msys64 link.exe shadows MSVC link.exe — use GNU toolchain for native builds
 [target.x86_64-pc-windows-gnu]
-linker = "C:\\Strawberry\\c\\bin\\gcc.exe"
+linker = "C:/msys64/mingw64/bin/gcc.exe"

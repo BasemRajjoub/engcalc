@@ -6,7 +6,8 @@ pub mod document;
 
 // Re-export the public API used by main.rs
 pub use document::{compile_document, compile_document_with_env, CompiledLine, PlotData, TableData};
-pub use units::Quantity;
+pub use units::{Quantity, parse_unit};
+pub use eval::eval_q as eval_quantity;
 
 #[cfg(test)]
 mod tests {

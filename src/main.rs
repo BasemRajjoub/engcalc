@@ -1,5 +1,6 @@
 mod calc;
 mod plot_svg;
+mod export;
 
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
@@ -302,6 +303,14 @@ impl eframe::App for App {
                     self.cell_envs.push(Default::default());
                 }
                 ui.label(format!("  {} cells", self.cells.len()));
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("📄  Export .docx").clicked() {
+                        let sources: Vec<String> = self.cells.iter().map(|c| c.source.clone()).collect();
+                        let docx_bytes = export::export_docx(&sources);
+                        save_docx(docx_bytes);
+                    }
+                });
             });
         });
 
@@ -435,6 +444,21 @@ fn render_table(ui: &mut egui::Ui, td: &calc::document::TableData) {
                 ui.end_row();
             }
         });
+}
+
+fn save_docx(bytes: Vec<u8>) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let path = format!("eqgui_export_{ts}.docx");
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        eprintln!("Export failed: {e}");
+    } else {
+        // Open with default app (Word)
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "", &path])
+            .spawn();
+        eprintln!("Exported: {path}");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
